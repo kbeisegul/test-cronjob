@@ -1,0 +1,59 @@
+image: docker:latest
+services:
+  - docker:dind
+
+stages:
+  - docker
+  - kuber
+
+variables:
+  ENV: "dev"
+  CONTAINER_TAGGED_IMAGE: ${CI_REGISTRY_IMAGE}:${CI_PIPELINE_ID}
+  CONTAINER_LAST_IMAGE: ${CI_REGISTRY_IMAGE}:$ENV
+  VERSION: ${CI_PIPELINE_ID}
+
+.kuber: &kuber
+  script:
+    - export REGISTRY_BASIC=$(echo -n ${CI_DEPLOY_USER}:${CI_DEPLOY_PASSWORD} | base64)
+    - cat ./deploy/CronJob.yaml | envsubst | kubectl apply -f -
+    #- cat ./deploy/secret.yaml | envsubst | kubectl apply -f -
+    #- cat ./deploy/deployment.yaml | envsubst | kubectl apply -f -
+    #- cat ./deploy/service.yaml | envsubst | kubectl apply -f -
+    #- cat ./deploy/ingress.yaml | envsubst | kubectl apply -f -
+
+docker:
+  stage: docker
+  tags:
+    - docker-runner
+  script:
+    - apk update && apk add jq
+    - export VERSION=`jq -r ".version" < ./package.json`
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
+    - docker build -t $CI_REGISTRY_IMAGE:$VERSION . -t $CONTAINER_TAGGED_IMAGE
+    - docker push $CONTAINER_TAGGED_IMAGE
+
+
+deploy_kuat:
+  image: thisiskj/kubectl-envsubst
+  stage: kuber
+  variables:
+    REPLICAS: 1
+    SERVER: "https://test-kuat-centos:6443"
+    CA_CERT: $CERT_TEST
+    SA_TOKEN: $DEPLOY_SA_TOKEN_TEST
+    DEPLOY_SA_NAME: "gitlab"
+  before_script:
+    - echo "$CA_CERT" > /test-ca.crt
+    - kubectl config set-cluster k8s --server=$SERVER
+    - kubectl config set clusters.k8s.certificate-authority /test-ca.crt
+    - kubectl config set-credentials $DEPLOY_SA_NAME --token=$SA_TOKEN
+    - kubectl config set-context $ENV --cluster=k8s --user=$DEPLOY_SA_NAME --namespace=test
+    - kubectl config use-context $ENV
+    - kubectl config get-contexts
+    - kubectl get nodes -o wide
+  #when: manual
+  environment:
+    name: ${ENV}
+  tags:
+    - docker-runner
+  <<: *kuber
